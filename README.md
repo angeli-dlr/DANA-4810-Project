@@ -1,2 +1,2 @@
-# DANA-4810-Project
- STEM Salary Prediction
+# STEM Salary Prediction
+The goal of this project is to predict the salaries of STEM professionals in the US, UK, Canada, and India using regression models, evaluated by RMSE, R-squared, and MAE. The model was built incorporating both categorical and numerical variables, their interactions, and transformations, along with higher-order terms. The analysis covered multicollinearity, residual analysis, and variable selection using stepwise regression and all-possible regression methods.

@@ -1,0 +1,1367 @@
+---
+title: "STEM Salary Prediction"
+author: 'Group 2: Neo, Geli, Mey'
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE, cache=FALSE}
+library(dplyr)
+library(leaps)
+library(sjPlot)
+library(sjmisc)
+library(ggplot2)
+library(see)
+#library(MASS)
+#library(qpcR)
+
+plot_residuals <- function(model, data, predictors) {
+  for (predictor in predictors) {
+    # Check if the predictor is a factor
+    predictor_data <- if (is.factor(data[[predictor]])) {
+      as.integer(data[[predictor]])
+    } else {
+      data[[predictor]]
+    }
+    
+    # Plot standardized residuals against the predictor
+    plot(rstandard(model) ~ predictor_data,
+         xlab = predictor, 
+         ylab = "Standardized Residuals",
+         main = paste("Partial Residual Plot:", predictor), 
+         pch = 16, col = "blue")
+    abline(h = 0, col = "red", lty = 2)
+    abline(h = c(-3, 3), col = "red", lty = 2)
+  }
+}
+
+# Plot interactions
+plot_interactions <- function(data, response, variables) {
+  for (i in 1:(length(variables) - 1)) {
+    for (j in (i + 1):length(variables)) {
+      var1 <- variables[i]
+      var2 <- variables[j]
+      
+      formula <- as.formula(paste(response, "~", var1, "*", var2))
+      
+      # Suppress warnings temporarily to allow plot creation
+      fit <- suppressWarnings(lm(formula, data = data))
+      
+      # Proceed with plot despite warning
+      tryCatch({
+        plot_model(fit, type = "pred", terms = c(var1, var2),
+                   title = paste("Interaction Plot:", var1, "x", var2))
+      }, error = function(e) {
+        message(paste("Failed to plot:", var1, "x", var2, "-", e$message))
+      })
+    }
+  }
+}
+
+# Extract Interaction Term P-values
+interaction_model_stats <- function(data, response, predictors) {
+  results <- data.frame(
+    Interaction = character(),
+    P_value = numeric(),
+    RSE = numeric(),
+    Adjusted_R_squared = numeric(),
+    Significant = logical(),
+    stringsAsFactors = FALSE
+  )
+  
+  for (i in 1:(length(predictors) - 1)) {
+    for (j in (i + 1):length(predictors)) {
+      var1 <- predictors[i]
+      var2 <- predictors[j]
+      
+      # Create formula for interaction
+      formula <- as.formula(paste(response, "~", var1, "*", var2))
+      fit <- lm(formula, data = data)
+      
+      # Extract coefficients summary
+      coeffs <- summary(fit)$coefficients
+      interaction_index <- grep(":", rownames(coeffs))  # Find indices with interaction terms
+      p_value <- NA
+      
+      # Check if interaction terms exist and extract the least p-value
+      if (length(interaction_index) > 0) {
+        p_value <- min(coeffs[interaction_index, "Pr(>|t|)"], na.rm = TRUE)
+      }
+      
+      # Check if the interaction is significant (p < 0.05)
+      significant <- !is.na(p_value) && p_value < 0.05
+      
+      # Extract RSE and Adjusted R-squared
+      rse <- summary(fit)$sigma
+      adj_r_squared <- summary(fit)$adj.r.squared
+      
+      # Store results
+      results <- rbind(results, data.frame(
+        Interaction = paste(var1, ":", var2, sep = ""),
+        P_value = p_value,
+        RSE = rse,
+        Adjusted_R_squared = adj_r_squared,
+        Significant = significant
+      ))
+    }
+  }
+  
+  # Sort by Significant (TRUE first) and Adjusted R-squared (highest first)
+  results <- results[order(-results$Significant, -results$Adjusted_R_squared), ]
+  
+  return(results)
+}
+
+# Extract Three-Way Interaction Term P-values
+three_way_interaction_model_stats <- function(data, response, predictors) {
+  results <- data.frame(
+    Interaction = character(),
+    P_value = numeric(),
+    RSE = numeric(),
+    Adjusted_R_squared = numeric(),
+    Significant = logical(),
+    stringsAsFactors = FALSE
+  )
+  
+  for (i in 1:(length(predictors) - 2)) {
+    for (j in (i + 1):(length(predictors) - 1)) {
+      for (k in (j + 1):length(predictors)) {
+        var1 <- predictors[i]
+        var2 <- predictors[j]
+        var3 <- predictors[k]
+        
+        # Create formula for three-way interaction
+        formula <- as.formula(paste(response, "~", var1, "*", var2, "*", var3))
+        fit <- lm(formula, data = data)
+        
+        # Extract coefficients summary
+        coeffs <- summary(fit)$coefficients
+        interaction_index <- grep(":", rownames(coeffs))  # Find indices with interaction terms
+        p_value <- NA
+        
+        # Check if interaction terms exist and extract the least p-value
+        if (length(interaction_index) > 0) {
+          p_value <- min(coeffs[interaction_index, "Pr(>|t|)"], na.rm = TRUE)
+        }
+        
+        # Check if the interaction is significant (p < 0.05)
+        significant <- !is.na(p_value) && p_value < 0.05
+        
+        # Extract RSE and Adjusted R-squared
+        rse <- summary(fit)$sigma
+        adj_r_squared <- summary(fit)$adj.r.squared
+        
+        # Store results
+        results <- rbind(results, data.frame(
+          Interaction = paste(var1, ":", var2, ":", var3, sep = ""),
+          P_value = p_value,
+          RSE = rse,
+          Adjusted_R_squared = adj_r_squared,
+          Significant = significant
+        ))
+      }
+    }
+  }
+  
+  # Sort by Significant (TRUE first) and Adjusted R-squared (highest first)
+  results <- results[order(-results$Significant, -results$Adjusted_R_squared), ]
+  
+  return(results)
+}
+
+```
+
+The goal of this project is to answer the question: ***What is the best model to predict the salaries of STEM employees?***
+
+## 1. Literature Review
+
+We found an article on Statistical Machine Learning Regression Models for Salary Prediction Featuring Economy-Wide Activities and Occupations. The key takeaways are:
+
+-   Salary prediction models in literature are mostly concerned with the problem of unequal pay based on gender, race, or other biases that are not related to job content or job performance
+-   The performance of each regression model is given based on root-mean-square error (RMSE), R-squared ($R^2$), and mean absolute error (MAE).
+-   In this study, when cover the broader salary estimates, minor groups can also be featured in the prediction model to capture the occupational characteristics.
+
+## 2. Data set Information
+
+-   We downloaded our data set from Kaggle, where a survey was conducted among Data Science and STEM professionals worldwide from 2017 to 2019. We initially started with about 60,000 rows of data, which was later reduced to 20,000 after removing missing data.
+-   Source: [https://www.kaggle.com/jackogozaly/data-science-and-STEM2-salaries](https://www.kaggle.com/jackogozaly/data-science-and-stem-salaries){.uri}
+
+```{r}
+# Read data set
+STEM2 <- read.csv("Levels_Fyi_Salary_Data.csv")
+attach(STEM2)
+```
+
+```{r}
+# Transform columns
+STEM2$timestamp <- as.POSIXct(STEM2$timestamp, format = "%m/%d/%Y %H:%M:%S")
+
+numerical_columns <- c("totalyearlycompensation", "yearsofexperience", "yearsatcompany", 
+                       "basesalary", "stockgrantvalue", "bonus", "cityid", "dmaid", "rowNumber")
+
+categorical_columns <- c("company", "level", "title", "location", "tag", "gender", 
+                         "otherdetails", "Masters_Degree", "Bachelors_Degree",
+                         "Doctorate_Degree", "Highschool", "Some_College", "Race_Asian", 
+                         "Race_White", "Race_Two_Or_More", "Race_Black", "Race_Hispanic", "Race", 
+                         "Education")
+
+# Transform columns to numerical and categorical
+STEM2 <- STEM2 %>%
+  mutate(across(all_of(numerical_columns), as.integer)) %>%
+  mutate(across(all_of(categorical_columns), as.factor))
+```
+
+The dataset consists of **12 variables**.
+
+Half of these are **numerical**, including:
+
+-   **Total yearly compensation, base salary, stock grant value, and bonus**—all measured in US dollars. Base salary, stock grant value, and bonus are components of total yearly compensation.
+
+-   **Years of experience and years at company**—measured in years, where years at company is a part of years of experience.
+
+For our analysis, we are considering either total yearly compensation or base salary as our potential outcome variables.
+
+For our **categorical** variables, we have a total of 6, comprising gender, race, country, education, Fortune 500 status, and job title. All of these variables have been transformed to simplify the levels, which originally included more than 5 categories (for race and education) or even 15 (for job title).
+
+-   **Gender**: male or female.
+-   **Race**: non-White or White.
+-   **Country**: only the top 4 highest-response countries were retained to ensure adequate representation.
+-   **Education**: PhD, Masters, and Bachelor’s/College/High School (grouped together).
+-   **Fortune 500**: a new variable created to determine whether a company ranks among the 2,000 high-revenue companies, which could potentially impact salary.
+-   **Job title**: Management versus non-managerial roles.
+
+```{r message=FALSE}
+library(summarytools) 
+print(dfSummary(STEM2), method = 'render')
+```
+
+### Missing Data
+
+#### Drop columns/rows:
+
+-   otherdetails: 35.9% missing (not needed)
+-   tag - 1.3% missing (not needed)
+-   cityid - not needed
+-   dmaid - not needed
+-   rowNumber - not needed
+-   level - too many levels (not needed)
+
+```{r}
+# List of columns to drop
+columns_to_drop <- c("timestamp", "otherdetails", "cityid", "dmaid", "rowNumber", "level")
+
+# Drop the specified columns
+STEM2 <- STEM2 %>%
+  dplyr::select(-all_of(columns_to_drop))
+```
+
+```{r}
+# List of columns to drop
+columns_to_drop <- c("Masters_Degree", "Bachelors_Degree", "Doctorate_Degree", "Highschool", 
+                     "Some_College", "Race_Asian", "Race_White", "Race_Two_Or_More", "Race_Black", "Race_Hispanic")
+
+# Drop the specified columns
+STEM2 <- STEM2 %>%
+  dplyr::select(-all_of(columns_to_drop))
+```
+
+```{r}
+# Check missing data
+colSums(is.na(STEM2))
+```
+
+```{r}
+# Remove rows with NA
+STEM2 <- STEM2 %>%
+  filter(!is.na(Race) | !is.na(Education))
+```
+
+```{r}
+# Remove rows with NA
+STEM2 <- STEM2 %>%
+  filter(!is.na(gender) | !is.na(Race) | !is.na(Education))
+```
+
+```{r}
+# Remove rows with NA
+STEM2 <- STEM2 %>%
+  filter(!is.na(gender) & !is.na(Race) & !is.na(Education))
+```
+
+```{r}
+# Check missing data
+colSums(is.na(STEM2))
+```
+
+### Create New or Recode Columns
+
+-   **Country**: Create column based on 'location'
+-   **Level**: Simplify
+-   **Title**: Simplify
+-   **Company**: Simplify
+-   **Education**: Simplify
+
+#### Create 'Country' column
+
+```{r}
+# Country
+
+# Ensure the 'location' column is character type
+STEM2$location <- as.character(STEM2$location)
+
+# Create a 'country' column by splitting the 'location' column and extracting the last part
+STEM2$country <- sapply(strsplit(STEM2$location, ", "), function(x) trimws(x[length(x)]))
+
+# Replace country codes (2-letter, e.g., "WA", "CA") with "US"
+STEM2$country[nchar(STEM2$country) == 2] <- "US"
+
+# Convert to factor
+STEM2$country <- as.factor(STEM2$country)
+
+# Replace 'United States' with 'US' in the specified column
+STEM2$country[STEM2$country == "United States"] <- "US"
+STEM2$country <- droplevels(STEM2$country)
+```
+
+```{r}
+# Retain only the high-response countries
+STEM2 <- STEM2[STEM2$country %in% c("United Kingdom", "Canada", "India", "US"), ]
+```
+
+#### Simplify the categorical variable levels
+
+```{r}
+library(stringr)
+
+# Create new column 'Fortune_500'
+fortune_500_list <- c("3M", "ABB", "Accenture", "Adidas", "Adobe", "ADP", "Aetna", "AIG", "Airbnb", "Airbus", "Albertsons", "Allianz", "Allstate", "Amazon", "American Express", "Amgen", "Analog Devices", "Apple", "Applied Materials", "AstraZeneca", "AT&T", "BAE Systems", "Bank of America", "Barclays", "Bayer", "Best Buy", "BlackRock", "Blackstone", "BNP Paribas", "Boeing", "Booz Allen Hamilton", "Broadcom", "CACI International", "CarMax", "Carvana", "Centene", "Cerner", "Charles Schwab", "Charter Communications", "Chevron", "Chewy", "Cigna", "Cisco", "Cognizant Technology Solutions", "Comcast", "Compass", "Conduent", "Continental", "Costco", "Costco Wholesale", "Coupang", "Cummins", "CVS Health", "Danaher", "Dell Technologies", "Delta Air Lines", "Deutsche Bank", "Deutsche Telekom", "Discover Financial Services", "Discovery", "DISH Network", "Disney", "DXC Technology", "eBay", "Electronic Arts", "Equinix", "Ericsson", "Expedia", "Expedia Group", "Facebook", "Fannie Mae", "FedEx", "Fiserv", "Ford Motor", "Ford Motor Company", "Freddie Mac", "Fujitsu", "Gap", "General Electric", "General Mills", "General Motors", "Global Payments", "Google", "GSK", "HCA Healthcare", "Hewlett Packard Enterprise", "Hitachi", "HP", "Humana", "IBM", "Intel", "Intel Corporation", "Intercontinental Exchange", "Intuit", "Johnson & Johnson", "Johnson Controls", "JP Morgan Chase", "JPMorgan Chase", "KLA", "Kohl's", "Kroger", "L3Harris Technologies", "Lam Research", "Lockheed Martin", "Lowe's", "Macy's", "MasterCard", "McDonald's", "McKesson", "Medtronic", "Merck", "MetLife", "Micron Technology", "Microsoft", "Moody's", "Morgan Stanley", "Motorola Solutions", "Mutual of Omaha", "Nasdaq", "NCR", "NetApp", "Netflix", "Nike", "Nokia", "Nordstrom", "Northrop Grumman", "Northwestern Mutual", "Nvidia", "Office Depot", "ON Semiconductor", "Oracle", "Pegatron", "PepsiCo", "Principal Financial Group", "Procter & Gamble", "Prudential Financial", "Qualcomm", "Quest Diagnostics", "Raytheon", "Raytheon Technologies", "S&P Global", "Salesforce", "Sberbank", "Schlumberger", "Schneider Electric", "ServiceNow", "Shell", "Siemens", "Sony", "Southwest Airlines", "Staples", "Starbucks", "State Street", "Stryker", "Swiss Re", "Symantec", "T. Rowe Price", "Target", "Tesco", "Tesla", "Texas Instruments", "The New York Times Company", "The Walt Disney Company", "Thermo Fisher Scientific", "TIAA", "Travelers", "Unilever", "UnitedHealth Group", "USAA", "Verizon", "Visa", "VMware", "Volkswagen", "Walmart", "Wayfair", "Wells Fargo", "Western Digital", "XPO Logistics", "Yahoo", "Zillow Group")
+cleaned_fortune_500 <- str_trim(tolower(fortune_500_list))
+
+STEM2 <- STEM2 %>%
+  mutate(
+    Fortune_500 = if_else(
+      str_trim(tolower(company)) %in% cleaned_fortune_500,
+      "Yes", 
+      "No"
+    )
+  )
+
+STEM2$Fortune_500 <- as.factor(STEM2$Fortune_500)
+```
+
+```{r}
+# Recode the 'title' column and store as 'title4'
+STEM2 <- STEM2 %>%
+  mutate(title4 = case_when(
+    title == "Business Analyst" ~ "Non-Management",
+    title == "Sales" ~ "Sales/HR/Marketing",
+    title == "Mechanical Engineer" ~ "Non-Management",
+    title == "Recruiter" ~ "Sales/HR/Marketing",
+    title == "Human Resources" ~ "Sales/HR/Marketing",
+    title == "Management Consultant" ~ "Non-Management",
+    title == "Software Engineer" ~ "Non-Management",
+    title == "Data Scientist" ~ "Non-Management",
+    title == "Marketing" ~ "Sales/HR/Marketing",
+    title == "Product Designer" ~ "Non-Management",
+    title == "Hardware Engineer" ~ "Non-Management",
+    title == "Solution Architect" ~ "Management",
+    title == "Product Manager" ~ "Management",
+    title == "Technical Program Manager" ~ "Management",
+    title == "Software Engineering Manager" ~ "Management",
+    TRUE ~ title # Retain the original value if it doesn't match any condition
+  ) %>% as.factor())
+
+# Remove rows where title2 is "Sales/HR/Marketing" (not enough data)
+STEM2 <- STEM2 %>%
+  filter(title4 != "Sales/HR/Marketing") %>% droplevels()
+```
+
+```{r}
+# Recode the 'Race' column and store as 'Race2'
+STEM2 <- STEM2 %>%
+  mutate(
+    Race2 = ifelse(Race == "White", "White", "Non-White")
+  %>% as.factor())
+```
+
+```{r}
+# Recode the 'Gender: Other' 
+STEM2 <- STEM2 %>%
+  mutate(gender = as.character(gender)) %>%
+  mutate(gender = ifelse(gender == "Other", "Female", gender))
+
+STEM2 <- STEM2 %>%
+  mutate(gender = as.factor(gender))
+```
+
+```{r}
+# Recode the 'Education: Highschool/Some College' column and store as 'educ3'
+STEM2 <- STEM2 %>%
+  mutate(educ3 = case_when(
+    Education == "Bachelor's Degree" ~ "College or below",
+    Education == "Highschool" ~ "College or below",
+    Education == "Some College" ~ "College or below",
+    Education == "Master's Degree" ~ "Master's Degree",
+    Education == "PhD" ~ "PhD",
+    TRUE ~ Education # Retain the original value if it doesn't match any condition
+  ) %>% as.factor())
+```
+
+### Set the base levels
+
+```{r}
+# Explicitly set factor levels with labels
+STEM2$gender <- factor(STEM2$gender, levels = c("Male", "Female"))
+STEM2$Race2 <- factor(STEM2$Race2, levels = c("Non-White", "White"))
+STEM2$educ3 <- factor(STEM2$educ3, levels = c("College or below", "Master's Degree", "PhD"))
+STEM2$Fortune_500 <- factor(STEM2$Fortune_500, levels = c("No", "Yes"))
+STEM2$title4 <- factor(STEM2$title4, levels = c("Non-Management", "Management"))
+STEM2$country <- factor(STEM2$country, levels = c("Canada", "India", "United Kingdom", "US"))
+```
+
+### Check if all combinations exists: Parameter Estimatability (Chapter 7.3)
+
+Some parameter combinations cannot be estimated due to missing data or sparse representation, limiting the model's ability to generalize for these cases.
+
+```{r}
+# Generate all possible combinations
+all_combinations <- expand.grid(
+  gender  = unique(STEM2$gender),
+  Race2  = unique(STEM2$Race2),
+  educ3  = unique(STEM2$educ3),
+  country  = unique(STEM2$country),
+  title4  = unique(STEM2$title4),
+  Fortune_500  = unique(STEM2$Fortune_500)
+)
+
+# Check for missing combinations
+missing_combinations <- anti_join(all_combinations, STEM2, by = c("gender", "educ3", "country", "title4", "Fortune_500"))
+
+missing_combinations
+```
+
+## 3. Variables Analysis
+
+### Scatterplot Matrix
+
+The scatterplot matrix below was used to determine the pairwise correlations of each of our numerical variables. From this graph, we can clearly see a strong positive linear correlation, which suggests multicollinearity (as expected), since some of these variables are derived from each other. There are also some relationships that are not immediately clear, as they appear to be clustered together (such as total yearly compensation and years of experience), but we will explore these in greater detail in the next sections.
+
+```{r}
+selected_columns <- STEM2[, c("totalyearlycompensation", "yearsofexperience", "yearsatcompany", "basesalary", "stockgrantvalue", "bonus")]  
+pairs(selected_columns)
+```
+
+### Correlation Matrix
+
+The heat map below shows the strength of correlations between our numerical variables. This further highlights the multicollinearity among the predictors, particularly with base salary, bonus, and stock grant value, all having correlations greater than 50% with total yearly compensation.
+
+Another notable correlation is between years of experience and years at company, which is at 55%. This makes sense, as years at the company is part of the total years of experience. Ultimately, we decided to retain both variables, as our goal is to estimate and predict salary.
+
+```{r}
+library(ggcorrplot)  
+selected_columns <- STEM2[, c("totalyearlycompensation", "yearsofexperience", "yearsatcompany", "stockgrantvalue", "bonus", "basesalary")]  
+ggcorrplot(round(cor(selected_columns), 2), lab=TRUE,lab_size = 3)
+```
+
+### Numerical Variable Distribution
+
+Next, we checked the distribution of each variable, starting with the numerical ones. We found that all of them are right-skewed with extreme outliers on the right, except for **base salary**, which has an almost bell-shaped curve with some outliers.
+
+```{r message=FALSE}
+# Exclude specific columns
+exclude_columns <- c("company", "Education")
+
+# Identify numerical columns, excluding the specified ones
+numerical_columns <- setdiff(names(STEM2)[sapply(STEM2, is.numeric)], exclude_columns)
+
+# Set options to disable scientific notation
+options(scipen = 10)  # Increase 'n' to make scientific notation less likely
+
+# Set up the plotting area for a 2x2 grid
+par(mfrow = c(2, 2))  # Set the plotting layout to 2 rows and 2 columns
+
+# Iterate through numerical columns and plot histograms
+for (col in numerical_columns) {
+  hist(
+    STEM2[[col]],
+    main = paste("Distribution of", col),
+    xlab = col,
+    col = "lightblue",
+    border = "white",
+    breaks = 20
+  )
+}
+
+# Reset the plotting parameters to default
+par(mfrow = c(1, 1))  # Reset to a single plot layout
+
+# Reset options to default after plotting
+options(scipen = 0)
+```
+
+### Categorical Variable Distribution
+
+For categorical variables, we observed very similar median base salaries for gender, race, and Fortune 500. However, for country, title, and education, there is a noticeable gap in the median base salaries.
+
+```{r message=FALSE}
+library(ggplot2)
+library(dplyr)
+library(gridExtra)
+
+# List of columns to exclude
+exclude_columns <- c("company", "Education", "tag", "title", "Race")
+
+# Identify categorical columns
+categorical_columns <- STEM2 %>%
+  select(where(is.factor)) %>%
+  select(-all_of(exclude_columns)) %>%
+  colnames()
+
+# Create a list to store the plots
+plot_list <- list()
+
+# Loop through each categorical column and create a box plot
+for (cat_col in categorical_columns) {
+  # Calculate median salary for each category
+  median_data <- STEM2 %>%
+    group_by(.data[[cat_col]]) %>%
+    summarise(median_salary = median(basesalary, na.rm = TRUE)) %>%
+    arrange(median_salary)
+  
+  # Reorder the factor levels based on the median salary
+  STEM2[[cat_col]] <- factor(STEM2[[cat_col]], 
+                             levels = median_data[[cat_col]][order(median_data$median_salary)])
+  
+  # Create the box plot with ordered x-axis based on the median salary
+  p <- ggplot(STEM2, aes_string(x = cat_col, y = "basesalary")) +
+    geom_boxplot() +
+    labs(title = paste("Box plot of basesalary by", cat_col),
+         x = cat_col,
+         y = "Base Salary") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 0, hjust = 1))
+  
+  # Append the plot to the list
+  plot_list[[cat_col]] <- p
+}
+
+# Arrange the plots in a 2x2 grid and display them
+do.call(grid.arrange, c(plot_list, ncol = 2))
+```
+
+### Multicollinearity
+
+Before proceeding with model building, we need to decide which variables to keep. Based on our pair plots and heatmaps, there is clear evidence of multicollinearity. This was further confirmed by fitting a simple model with total yearly compensation as the dependent variable.
+
+1.  Global utility of the model is highly significant, but t-tests for individual beta’s are insignificant.
+2.  Negative values for education (PhD, Masters), country (US) even when we expect a positive relationship against the totalyearlycompensation (Y).
+3.  Although VIF values did not exceed 10, suggesting that multicollinearity is not a significant concern, it is important to note that basesalary, stockgrantvalue, and bonus together form the totalyearlycompensation.
+
+With this, we will be using basesalary as our Y as we build our model.
+
+-   **Remove**: totalyearlycompensation, stockgrantvalue, bonus
+-   **Keep**: basesalary
+
+```{r}
+# Fit the model with selected variables (Multicollinearity)
+M=lm(totalyearlycompensation~basesalary+yearsofexperience+yearsatcompany+
+       stockgrantvalue+bonus+gender+Race2+educ3+country+Fortune_500+title4, 
+     data = STEM2) 
+summary(M)
+```
+
+```{r}
+# Check VIF
+car::vif(M)
+```
+
+## 4. Model Building
+
+The next phase is model building. In this phase, we develop a model relating our dependent variable (Y) to the independent variables we've identified. We also explore potential transformations for our quantitative predictors (X) and interactions between quantitative and categorical variables. We then compare models with only the main effects terms to those with transformations and interactions, and use automated variable selection methods to identify the most important predictors.
+
+### a) Variable Transformations
+
+We start by writing the model with our quantitative independent variables, beginning with years of experience. Based on our scatterplot, which shows that the relationship between years of experience and base salary is right-skewed, we aim to test for a linear pattern. We try transforming the variable into its quadratic, logarithmic, and square root forms to examine any improvements.
+
+As shown, all individual t-tests for each transformation are significant, and the ANOVA tests indicate that these transformations contribute significantly to predicting Y. However, there is minimal improvement in their RSEs and adjusted R-squared values compared to the main effects model.
+
+Examining closely at their graphs, the linear and quadratic fits appear almost identical, except for differences in their residuals. In contrast, transformations such as the logarithm and square root of X effectively redistribute the data points in the scatterplot, reducing skewness and yielding a more normalized distribution. However, their residuals are still very similar to the linear fit, which is our main effects model.
+
+#### i) yearsofexperience
+
+##### Linear Fit
+
+```{r}
+M00=lm(basesalary~yearsofexperience, data = STEM2) 
+summary(M00)
+```
+
+```{r}
+par(mfrow = c(2, 2))
+
+# Scatterplot with regression line
+plot(STEM2$basesalary~STEM2$yearsofexperience, pch=16, col="blue",
+     main="Linear Fit")
+abline(M00)
+
+# Plot the standardized residuals against x
+plot(STEM2$yearsofexperience, rstandard(M00), pch=19, col="blue",
+     xlab = "Years of experience", 
+     ylab = "Residuals", ylim=c(-5,5),
+     main = "Standardized Residuals")
+abline(h = 0, col = "red", lty = 2) 
+abline(h = c(-3, 0, 3), col = "red", lty = 2) 
+
+# Residuals vs. Fitted
+plot(M00, 1, pch=16, col="blue")
+
+# Check normality
+plot(M00, 2, pch=16, col="blue")
+```
+
+##### Quadratic transformation on X
+
+```{r}
+M01=lm(basesalary~yearsofexperience+I(yearsofexperience^2), data = STEM2) 
+summary(M01)
+```
+
+```{r}
+par(mfrow = c(2, 2))
+
+# Scatterplot with regression line
+experience_seq <- seq(min(STEM2$yearsofexperience), max(STEM2$yearsofexperience), length.out = 100)
+predicted_salary <- predict(M01, newdata = data.frame(yearsofexperience = experience_seq))
+plot(STEM2$basesalary ~ STEM2$yearsofexperience, pch = 16, col = "blue",
+     xlab = "Years of Experience", ylab = "Base Salary",
+     main = "Quadratic Fit")
+lines(experience_seq, predicted_salary, col = "red", lwd = 2)
+
+# Plot the standardized residuals
+plot(STEM2$yearsofexperience, rstandard(M01), pch=19, col="blue",
+     xlab = "Years of experience (in months)", 
+     ylab = "Residuals", ylim=c(-5,5),
+     main = "Standardized Residuals")
+abline(h = 0, col = "red", lty = 2) 
+abline(h = c(-3, 0, 3), col = "red", lty = 2) 
+
+# Residuals vs. Fitted
+plot(M01, 1, pch=16, col="blue")
+
+# Check normality
+plot(M01, 2, pch=16, col="blue")
+```
+
+##### Log transformation on X
+
+```{r}
+# Add a small constant to avoid log(0) or remove the rows with 0 exp. completely
+M020_log=lm(basesalary~yearsofexperience+log(yearsofexperience+0.001), data = STEM2) 
+summary(M020_log)
+```
+
+```{r}
+par(mfrow = c(2, 2))
+
+# Scatterplot with regression line
+plot(STEM2$basesalary~log(STEM2$yearsofexperience), main="Log of X", pch=16, col="blue")
+predicted <- predict(M020_log, newdata = STEM2)
+points(log(STEM2$yearsofexperience), predicted, col = "red", pch = 16)
+lines(sort(log(STEM2$yearsofexperience)), 
+      predicted[order(log(STEM2$yearsofexperience))], 
+      col = "red", lwd = 2)
+
+# Plot the standardized residuals
+plot(STEM2$yearsofexperience, rstandard(M020_log), pch=19, col="blue",
+     xlab = "Years of experience", 
+     ylab = "Residuals", ylim=c(-5,5),
+     main = "Standardized Residuals")
+abline(h = 0, col = "red", lty = 2) 
+abline(h = c(-3, 0, 3), col = "red", lty = 2) 
+
+# Residuals vs. Fitted
+plot(M020_log, 1, pch=16, col="blue")
+
+# Check normality
+plot(M020_log, 2, pch=16, col="blue")
+```
+
+##### Square root of X
+
+```{r}
+M020_sqrt=lm(basesalary~yearsofexperience+sqrt(yearsofexperience), data = STEM2) 
+summary(M020_sqrt)
+```
+
+```{r}
+par(mfrow = c(2, 2))
+
+# Scatterplot with regression line
+plot(STEM2$basesalary~sqrt(STEM2$yearsofexperience), main="Square Root of X", pch=16, col="blue")
+predicted <- predict(M020_sqrt, newdata = STEM2)
+points(sqrt(STEM2$yearsofexperience), predicted, col = "red", pch = 16)
+lines(sort(sqrt(STEM2$yearsofexperience)), 
+      predicted[order(sqrt(STEM2$yearsofexperience))], 
+      col = "red", lwd = 2)
+
+# Plot the standardized residuals
+plot(STEM2$yearsofexperience, rstandard(M020_sqrt), pch=19, col="blue",
+     xlab = "Years of experience (in months)", 
+     ylab = "Residuals", ylim=c(-5,5),
+     main = "Standardized Residuals")
+abline(h = 0, col = "red", lty = 2) 
+abline(h = c(-3, 0, 3), col = "red", lty = 2) 
+
+# Residuals vs. Fitted
+plot(M020_sqrt, 1, pch=16, col="blue")
+
+# Check normality
+plot(M020_sqrt, 2, pch=16, col="blue")
+```
+
+### Histogram comparisons: Main Effect vs. Quadratic vs. Log vs. Square Root
+
+```{r}
+par(mfrow = c(2, 2))
+hist(STEM2$yearsofexperience) 
+hist(M00$residuals)
+hist(I(STEM2$yearsofexperience^2)) 
+hist(M01$residuals) 
+```
+
+```{r}
+par(mfrow = c(2, 2))
+hist(log(STEM2$yearsofexperience)) 
+hist(M020_log$residuals) 
+hist(sqrt(STEM2$yearsofexperience))
+hist(M020_sqrt$residuals)
+```
+
+#### ii) yearsatcompany
+
+A similar pattern is observed with the second quantitative variable, years at company. Although individual t-tests and ANOVA show that the transformations are statistically significant, they result in only minimal improvements in RSE and adjusted R-squared values compared to the main effects model.
+
+##### Linear Fit
+
+```{r}
+M1_comp=lm(basesalary~yearsatcompany, data = STEM2) 
+summary(M1_comp)
+```
+
+##### Quadratic transformation on X
+
+```{r}
+M2_comp=lm(basesalary~yearsatcompany+I(yearsatcompany^2), data = STEM2) 
+summary(M2_comp)
+```
+
+##### Log transformation on X
+
+```{r}
+M3_comp=lm(basesalary~yearsatcompany+log(yearsatcompany+0.001), data = STEM2) 
+summary(M3_comp)
+```
+
+##### Square Root of X
+
+```{r}
+M4_comp=lm(basesalary~yearsatcompany+sqrt(yearsatcompany), data = STEM2) 
+summary(M4_comp)
+```
+
+### b) Interaction Terms
+
+Next, we introduce the main effects and interaction terms for the qualitative independent variables to examine whether the effect of one predictor on the response variable depends on the level of another predictor. With 8 predictors in total, there are 28 possible two-way combinations, and 18 of these were found to be significant. However, when comparing the model with only the main effects of these two predictors to the model with their two-way interaction, we observed only a slight improvement in both the RSE and adjusted R-squared.
+
+#### Two-way interaction
+
+```{r}
+response_var <- "basesalary"
+predictor_vars <- c("yearsofexperience", "yearsatcompany", "gender", "Race2", 
+                    "educ3", "country", "title4", "Fortune_500")
+
+results <- interaction_model_stats(data = STEM2, response = response_var, 
+                               predictors = predictor_vars)
+print(results)
+```
+
+We visually inspected the interactions of these predictors, focusing on those with a greater than 0.10% improvement in the adjusted R-squared.
+
+-   The base salary increase for College graduates (or lower) with more years at the company or with more experience is slightly higher compared to those with Master’s or Doctoral degrees. Individuals with advanced degrees often start with higher salaries, but their salary growth tends to slow as they’ve already reached a high initial value. On the other hand, College graduates, starting with lower salaries, see faster growth as they gain experience and seniority, particularly if they stay with the company longer. This suggests that companies may prioritize compensating for experience and tenure in lower-educated employees, which results in steeper salary increases over time, aligning with the idea that experience can sometimes substitute for formal education.
+-   We also see that base salary growth is slightly higher for non-management roles with more years at the company or with more experience compared to management roles. Non-management positions often require specialized technical skills, which are in high demand and continue to grow in value, leading to higher salary increases. In contrast, management roles focus on leadership and strategy, which may not see the same market-driven salary growth as technical skills, which directly impact productivity. As industries, especially tech, increasingly value technical talent, non-management roles often experience faster salary growth, creating a wage premium over management positions.
+
+```{r}
+library(grid)
+library(sjPlot)
+library(sjmisc)
+library(ggplot2)
+library(gridExtra)
+
+# Ensure consistent theme for all plots
+theme_set(theme_sjplot())
+
+# List of models and terms
+models <- list(
+  list(model = lm(basesalary ~ title4 * educ3, data = STEM2), terms = c("title4", "educ3")),
+  list(model = lm(basesalary ~ Race2 * educ3, data = STEM2), terms = c("Race2", "educ3")),
+  list(model = lm(basesalary ~ yearsatcompany * educ3, data = STEM2), terms = c("yearsatcompany", "educ3")),
+  list(model = lm(basesalary ~ yearsofexperience * educ3, data = STEM2), terms = c("yearsofexperience", "educ3")),
+  list(model = lm(basesalary ~ yearsatcompany * title4, data = STEM2), terms = c("yearsatcompany", "title4")),
+  list(model = lm(basesalary ~ yearsofexperience * title4, data = STEM2), terms = c("yearsofexperience", "title4")),
+  list(model = lm(basesalary ~ yearsofexperience * yearsatcompany, data = STEM2), terms = c("yearsofexperience", "yearsatcompany")),
+  list(model = lm(basesalary ~ country * educ3, data = STEM2), terms = c("country", "educ3"))
+)
+
+# Generate the plots
+plots <- lapply(models, function(x) {
+  plot_model(x$model, type = "pred", terms = x$terms)
+})
+
+# Arrange plots in a 2x2 grid
+grid.arrange(grobs = plots[1:4], ncol = 2, nrow = 2)
+grid.arrange(grobs = plots[5:8], ncol = 2, nrow = 2)
+```
+
+#### Three-way interaction
+
+We also explored 3-way and 4-way interaction plots but encountered a rank deficiency issue, which prevents the estimation of unique coefficients for all predictors. This is likely caused by overfitting, or too many categorical variables with multiple levels, or insufficient data to support higher-order interactions.
+
+As a result, we decided not to pursue these higher-order interaction terms, as they are not theoretically justified and do not contribute significantly to the model.
+
+```{r}
+data <- STEM2  
+response <- "basesalary"
+predictors <- c("yearsofexperience", "yearsatcompany", "gender", "Race2", 
+                    "educ3", "country", "title4", "Fortune_500")
+result <- three_way_interaction_model_stats(data, response, predictors)
+#print(result)
+```
+
+```{r}
+fit3 <- lm(basesalary ~ yearsofexperience * educ3 * country, data = STEM2)
+plot_model(fit3, type = "pred", terms = c("yearsofexperience", "educ3", "country"))
+```
+
+#### Four-way interaction
+
+```{r}
+fit4 <- lm(basesalary ~ yearsofexperience * educ3 * title4 * country, data = STEM2)
+plot_model(fit4, type = "pred", terms = c("yearsofexperience", "educ3", "title4", "country"))
+```
+
+### c) Main Effects Model
+
+Now that we have established what transformations or interactions not to include, we are ready to build our model, starting with the main effects. Fitting all 8 predictors against the base salary (Y), we initially identified an insignificant predictor, Fortune 500, which we removed.
+
+```{r include=FALSE}
+# Explicitly set factor levels with labels
+STEM2$gender <- factor(STEM2$gender, levels = c("Male", "Female"))
+STEM2$Race2 <- factor(STEM2$Race2, levels = c("Non-White", "White"))
+STEM2$educ3 <- factor(STEM2$educ3, levels = c("College or below", "Master's Degree", "PhD"))
+STEM2$Fortune_500 <- factor(STEM2$Fortune_500, levels = c("No", "Yes"))
+STEM2$title4 <- factor(STEM2$title4, levels = c("Non-Management", "Management"))
+STEM2$country <- factor(STEM2$country, levels = c("Canada", "India", "United Kingdom", "US"))
+```
+
+```{r}
+Main <- lm(formula = basesalary ~ yearsofexperience + yearsatcompany + gender + 
+             Race2 + educ3 + country + title4 + Fortune_500, data = STEM2)
+summary(Main)
+```
+
+After this adjustment, all remaining predictors were significant, and the model's adjusted R-squared improved to 50%, indicating moderate fit. The overall model is also statistically significant.
+
+```{r}
+Main_Fortune <- lm(formula = basesalary ~ yearsofexperience + yearsatcompany + 
+                     gender + Race2 + educ3 + country + title4, data = STEM2)
+summary(Main_Fortune)
+```
+
+#### Residual Plots (Detect Lack of Fit)
+
+We inspected the residual plots of the main effects model to assess potential lack of fit. Standardized residuals were plotted against the predicted values (Y) and also against each of the independent variables. Several residuals lie beyond 2 standard deviations from the mean. We will be removing these outliers to evaluate whether this improves the model's predictive power. It is also important to note these residuals constitute only 2.5% of the dataset, which falls below the 5% threshold, making their removal statistically justifiable.
+
+```{r}
+par(mfrow = c(2, 2))
+
+# Plot residuals against predicted value
+plot(rstandard(Main) ~ predict(Main),
+     xlab = "Fitted values", ylab = "Standardized Residuals",
+     main = "Standardized Residual Plot", pch=16, col="blue")
+abline(h = 0, col = "red", lty = 2) 
+abline(h = c(-3, 0, 3), col = "red", lty = 2) 
+# same as above but not standardized
+#plot(Main, 1, pch=16, col="blue")
+
+# Plot residuals against each individual x
+predictors <- c("yearsofexperience", "yearsatcompany", "gender", "Race2", "educ3", "country", "title4")
+plot_residuals(Main, STEM2, predictors)
+
+
+# Check normality
+plot(Main, 2, pch=16, col="blue")
+```
+
+#### Check outliers
+
+```{r}
+# From regression model
+outliers <- which(abs(rstandard(Main)) > 2)
+#STEM2[outliers, ] #display
+
+# Delete outliers
+STEM3 <- STEM2[-outliers, ]
+```
+
+#### Refit the model
+
+After removing these outliers, we observed an immediate improvement in the adjusted R-squared, which increased to 64.27%, representing a 14% improvement from the previous model that included the outliers. The RSE also improved, decreasing to 28,720, compared to the previous value of 39,920 (close to 40k).
+
+```{r include=FALSE}
+# Explicitly set factor levels with labels
+STEM3$gender <- factor(STEM3$gender, levels = c("Male", "Female"))
+STEM3$Race2 <- factor(STEM3$Race2, levels = c("Non-White", "White"))
+STEM3$educ3 <- factor(STEM3$educ3, levels = c("College or below", "Master's Degree", "PhD"))
+STEM3$Fortune_500 <- factor(STEM3$Fortune_500, levels = c("No", "Yes"))
+STEM3$title4 <- factor(STEM3$title4, levels = c("Non-Management", "Management"))
+STEM3$country <- factor(STEM3$country, levels = c("Canada", "India", "United Kingdom", "US"))
+```
+
+```{r}
+# Refit the model
+Main <- lm(formula = basesalary ~ yearsofexperience + yearsatcompany + 
+             gender + Race2 + educ3 + country + title4 + Fortune_500, data = STEM3)
+summary(Main)
+```
+
+```{r}
+par(mfrow = c(2, 2))
+
+# Plot residuals against predicted value
+plot(rstandard(Main) ~ predict(Main),
+     xlab = "Fitted values", ylab = "Standardized Residuals",
+     main = "Standardized Residual Plot", pch=16, col="blue")
+abline(h = 0, col = "red", lty = 2) 
+abline(h = c(-2, 0, 2), col = "red", lty = 2) 
+# same as above but not standardized
+#plot(Main, 1, pch=16, col="blue")
+
+# Plot residuals against each individual x
+predictors <- c("yearsofexperience", "yearsatcompany", "gender", "Race2", "educ3", "country", "title4")
+plot_residuals(Main, STEM3, predictors)
+
+
+# Check normality
+plot(Main, 2, pch=16, col="blue")
+```
+
+### d) Stepwise Regression
+
+#### Main effects model
+
+The second model we developed uses Stepwise Regression, one of the most commonly used variable selection methods. In the first run, we included all the predictors but only their main effects. This model was tested on the data after removing outliers, and as shown, both the RSE and the adjusted R-squared have improved. All individual predictors included in the model are statistically significant, as indicated by their respective t-tests.
+
+```{r}
+# Perform stepwise regression on Main effects model 
+step(lm(formula = basesalary ~ yearsofexperience + 
+    yearsatcompany + gender + Race2 + educ3 + country + title4 + Fortune_500,
+    data = STEM3),direction="both")
+```
+
+```{r}
+# Run the result of the stepwise regression
+M2 <- lm(formula = basesalary ~ yearsofexperience + 
+    yearsatcompany + gender + Race2 + educ3 + country + title4 + Fortune_500,
+    data = STEM3)
+summary(M2)
+```
+
+#### Main effects model + Transformation + Interaction
+
+Next, we ran a second Stepwise Regression, this time incorporating both transformations and interactions identified as highly significant in the earlier analysis. The resulting model, shown on the screen, produced only a modest improvement: a slight increase of just over 1% in adjusted R-squared and a small reduction of RSE by only 100.
+
+```{r}
+# Perform stepwise regression on Main effects model + Transformation + Interaction
+step(lm(formula = basesalary ~ yearsofexperience 
+                   + sqrt(yearsofexperience) 
+                   + yearsatcompany + gender + Race2 + educ3 + country 
+                   + title4 + Fortune_500 + yearsofexperience:country + 
+          educ3:country + yearsofexperience:educ3 + yearsofexperience:yearsatcompany + 
+          yearsofexperience:title4 + yearsofexperience:Fortune_500 + educ3:title4 + 
+          yearsatcompany:educ3 + Race2:educ3 + yearsatcompany:title4 + educ3:Fortune_500 + 
+          gender:educ3 + gender:title4 + yearsatcompany:Fortune_500 + gender:Race2,
+                   data = STEM3),direction="both")
+```
+
+```{r}
+# Run the result of the stepwise regression
+summary(lm(formula = basesalary ~ yearsofexperience + sqrt(yearsofexperience) + 
+    yearsatcompany + gender + Race2 + educ3 + country + title4 + 
+    Fortune_500 + yearsofexperience:country + educ3:country + 
+    yearsofexperience:educ3 + yearsofexperience:yearsatcompany + 
+    yearsofexperience:title4 + yearsofexperience:Fortune_500 + 
+    yearsatcompany:educ3 + yearsatcompany:title4 + gender:title4 + 
+    yearsatcompany:Fortune_500, data = STEM3))
+```
+
+### e) All-Possible-Regressions Selection
+
+We then used the All-Possible-Regressions Selection procedure to identify the “best” subset of variables. With 11 variables, there are 2,047 possible subsets of first-order models, representing different combinations of predictors.
+
+```{r}
+# Create new binary columns for each level of educ3
+STEM3$Bachelor <- ifelse(STEM3$educ3 == "College or below", 1, 0)
+STEM3$Masters <- ifelse(STEM3$educ3 == "Master's Degree", 1, 0)
+STEM3$PhD <- ifelse(STEM3$educ3 == "PhD", 1, 0)
+```
+
+```{r}
+# Create new binary columns for each level of country
+STEM3$Canada <- ifelse(STEM3$country == "Canada", 1, 0)
+STEM3$India <- ifelse(STEM3$country == "India", 1, 0)
+STEM3$UK <- ifelse(STEM3$country == "United Kingdom", 1, 0)
+STEM3$US <- ifelse(STEM3$country == "US", 1, 0)
+```
+
+#### Show the possible models only for the “best” model for each value of p
+
+The table on screen shows the “best” model for each number of predictors (p). For example, the best one-variable model includes the country India, while the best two-variable model includes India and years of experience, and so on.
+
+```{r}
+Model_all_2=regsubsets(basesalary~yearsofexperience+yearsatcompany+gender+Race2+
+                         Fortune_500+title4+Masters+PhD+India+UK+US,data=STEM3, nvmax = 11)
+summary(Model_all_2)
+```
+
+#### Summarize the "best subset" models along with their criteria
+
+Next, we summarized the best subset models along with their criteria such as the R-squared, MSE, CP, PRESS.
+
+In the table, we can see that the 11th subset maximizes the R-squared and adjusted R-squared while also minimizing the rest of the criteria. Plotting these quantities against the number of predictors, shows that all variables should be included in the group of the most important predictors.
+
+```{r include=FALSE}
+SUM=summary(Model_all_2)
+
+#names(SUM)
+Rsq=SUM$rsq
+CP=SUM$cp
+AdRsq=SUM$adjr2
+BIC=SUM$bic
+RSS=SUM$rss
+
+#Calculation of AIC
+n <- length(STEM3$basesalary)
+p <- apply(SUM$which, 1, sum) # Number of predictors in each model
+AIC <- SUM$bic - log(n) * p + 2 * p
+
+#number of independent variables in the models
+I=p-1
+MSE1=RSS/(n-I-1)
+
+##PRESS 
+m1=lm(basesalary~India, data = STEM3)
+s1=summary(m1)
+m2=lm(basesalary~India+yearsofexperience, data = STEM3)
+s2=summary(m2)
+m3=lm(basesalary~India+yearsofexperience+US, data = STEM3)
+s3=summary(m3)
+m4=lm(basesalary~India+yearsofexperience+US+PhD, data = STEM3)
+s4=summary(m4)
+m5=lm(basesalary~India+yearsofexperience+US+PhD+yearsatcompany, data = STEM3)
+s5=summary(m5)
+m6=lm(basesalary~India+yearsofexperience+US+PhD+yearsatcompany+Masters, data = STEM3)
+s6=summary(m6)
+m7=lm(basesalary~India+yearsofexperience+US+PhD+yearsatcompany+Masters+title4, data = STEM3)
+s7=summary(m7)
+m8=lm(basesalary~India+yearsofexperience+US+PhD+yearsatcompany+Masters+title4+gender, data = STEM3)
+s8=summary(m8)
+m9=lm(basesalary~India+yearsofexperience+US+PhD+yearsatcompany+Masters+title4+gender+Race2, data = STEM3)
+s9=summary(m9)
+m10=lm(basesalary~India+yearsofexperience+US+PhD+yearsatcompany+Masters+title4+gender+Race2+UK, data = STEM3)
+s10=summary(m10)
+m11=lm(basesalary~India+yearsofexperience+US+PhD+yearsatcompany+Masters+title4+gender+Race2+UK+Fortune_500, data = STEM3)
+s11=summary(m11)
+
+n1=qpcR::PRESS(m1)
+a1=n1$stat
+b1=s1$sigma
+n2=qpcR::PRESS(m2)
+a2=n2$stat
+b2=s2$sigma
+n3=qpcR::PRESS(m3)
+a3=n3$stat
+b3=s3$sigma
+n4=qpcR::PRESS(m4)
+a4=n4$stat
+b4=s4$sigma
+n5=qpcR::PRESS(m5)
+a5=n5$stat
+b5=s5$sigma
+n6=qpcR::PRESS(m6)
+a6=n6$stat
+b6=s6$sigma
+n7=qpcR::PRESS(m7)
+a7=n7$stat
+b7=s7$sigma
+n8=qpcR::PRESS(m8)
+a8=n8$stat
+b8=s8$sigma
+n9=qpcR::PRESS(m9)
+a9=n9$stat
+b9=s9$sigma
+n10=qpcR::PRESS(m10)
+a10=n10$stat
+b10=s10$sigma
+n11=qpcR::PRESS(m11)
+a11=n11$stat
+b11=s11$sigma
+PRESS=c(a1,a2,a3,a4,a5,a6,a7,a8,a9,a10,a11)
+MSE=(c(b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11))^2
+```
+
+```{r}
+# Result
+cbind(SUM$which,round(cbind(Rsq,AdRsq,CP,BIC,RSS,AIC,PRESS,MSE,MSE1),4))
+```
+
+```{r}
+par(mfrow=c(2,2))
+plot(p,Rsq,xlab="Subset Size",ylab="Adjusted R-squared", pch=19, col="blue")
+plot(p,Rsq,xlab="Subset Size",ylab="R-squared", pch=19, col="blue")
+plot(p,CP,xlab="Subset Size",ylab="CP", pch=19, col="blue")
+lines(y=p+1,x=p, col="red")
+plot(p,PRESS,xlab="Subset Size",ylab="PRESS", pch=19, col="blue")
+```
+
+## 5. Model Fitting
+
+Our last step is Model Fitting, where we used stratified random sampling per country to split the data into 80% training and 20% test.
+
+### Prepare 80% Training and 20% Test Data
+
+```{r}
+# Function to split data into training and test sets for each country
+split_data_by_country <- function(data, train_ratio = 0.8) {
+  # Group by country and split within each group
+  data_split <- data %>%
+    group_by(country) %>%
+    group_split() %>%
+    lapply(function(group) {
+      set.seed(123)  # Ensures reproducibility
+      sample_index <- sample(1:nrow(group), size = floor(train_ratio * nrow(group)))
+      list(
+        train = group[sample_index, ],
+        test = group[-sample_index, ]
+      )
+    })
+  
+  # Combine training and test sets from all countries
+  train_data <- bind_rows(lapply(data_split, `[[`, "train"))
+  test_data <- bind_rows(lapply(data_split, `[[`, "test"))
+  
+  return(list(train = train_data, test = test_data))
+}
+
+# Example usage
+set.seed(123)  # For reproducibility
+data_split <- split_data_by_country(STEM3, train_ratio = 0.8)
+
+train_set <- data_split$train
+test_data <- data_split$test
+
+# Verify proportions
+table(train_set$country) / table(STEM3$country)
+table(test_data$country) / table(STEM3$country)
+```
+
+```{r}
+#set the base level
+train_set$gender <- relevel(train_set$gender, ref = "Male")
+train_set$Race2 <- relevel(train_set$Race2, ref = "Non-White")
+train_set$educ3 <- relevel(train_set$educ3, ref = "College or below")
+train_set$Fortune_500 <- relevel(train_set$Fortune_500, ref = "No")
+train_set$title4 <- relevel(train_set$title4, ref = "Non-Management")
+train_set$country <- relevel(train_set$country, ref = "Canada")
+
+test_data$gender <- relevel(test_data$gender, ref = "Male")
+test_data$Race2 <- relevel(test_data$Race2, ref = "Non-White")
+test_data$educ3 <- relevel(test_data$educ3, ref = "College or below")
+test_data$Fortune_500 <- relevel(test_data$Fortune_500, ref = "No")
+test_data$title4 <- relevel(test_data$title4, ref = "Non-Management")
+test_data$country <- relevel(test_data$country, ref = "Canada")
+```
+
+```{r}
+# Function to Calculate Performance Metrics
+calculate_metrics <- function(model, test_data) {
+  # Predicted values
+  predicted <- predict(model, newdata = test_data)
+  
+  # Actual values
+  actual <- test_data[[as.character(formula(model)[[2]])]]
+  
+  # Calculate metrics
+  residuals <- actual - predicted
+  mse <- mean(residuals^2)
+  rmse <- sqrt(mse)
+  mae <- mean(abs(residuals))
+  r_squared <- summary(model)$r.squared
+  
+  return(data.frame(
+    MSE = mse,
+    RMSE = rmse,
+    MAE = mae,
+    R_Squared = r_squared
+  ))
+}
+```
+
+```{r}
+# Function to Plot Predicted vs. Actual
+plot_predictions <- function(model, test_data) {
+  # Predicted values
+  predicted <- predict(model, newdata = test_data)
+  
+  # Actual values
+  actual <- test_data[[as.character(formula(model)[[2]])]]
+  
+  # Create scatter plot
+  library(ggplot2)
+  ggplot(data = data.frame(Actual = actual, Predicted = predicted), aes(x = Actual, y = Predicted)) +
+    geom_point(color = "blue", alpha = 0.6) +
+    geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
+    labs(title = "Predicted vs. Actual Values",
+         x = "Actual Values",
+         y = "Predicted Values") +
+    scale_x_continuous(labels = function(x) format(x, big.mark = ",", scientific = FALSE)) +
+  scale_y_continuous(labels = function(x) format(x, big.mark = ",", scientific = FALSE)) +
+    theme_minimal()
+}
+```
+
+### Comparing the Models
+
+We have two models for comparison: the **Main Effects model** and the **Main Effects model with Transformations and Interactions**.
+
+When comparing the predicted vs. actual value graphs side by side, there is no noticeable difference between the two. Based on their adjusted R-squared values, incorporating transformations and interactions only led to a slight improvement in model fit, increasing the adjusted R-squared by just over 1%. Therefore, the simpler Main Effects model is the best, as it provides comparable performance with fewer complexities.
+
+#### 1) Main Effects (Simple) / All-Possible Regressions Model
+
+```{r}
+# Fit the model
+model <- lm(formula = basesalary ~ yearsofexperience + yearsatcompany + 
+    gender + Race2 + educ3 + country + title4 + Fortune_500, 
+    data = train_set)
+summary(model)
+
+# Calculate metrics
+metrics <- calculate_metrics(model, test_data)
+print(metrics)
+
+# Plot predictions
+plot_predictions(model, test_data)
+```
+
+#### 2) Stepwise Model (with Interaction + Transformation)
+
+```{r}
+# Fit the model
+model1 <- lm(formula = basesalary ~ yearsofexperience + sqrt(yearsofexperience) + 
+    yearsatcompany + gender + Race2 + educ3 + country + title4 + 
+    Fortune_500 + yearsofexperience:country + educ3:country + 
+    yearsofexperience:educ3 + yearsofexperience:yearsatcompany + 
+    yearsofexperience:title4 + yearsofexperience:Fortune_500 + 
+    yearsatcompany:educ3 + yearsatcompany:title4 + gender:title4 + 
+    yearsatcompany:Fortune_500, data = train_set)
+summary(model1)
+
+# Calculate metrics
+metrics <- calculate_metrics(model1, test_data)
+print(metrics)
+
+# Plot predictions
+plot_predictions(model1, test_data)
+```
+
+### Predicting the salary of a new-graduate in Canada
+
+We also attempted to use the prediction function to estimate the salary of a male, non-White, college graduate in Canada who landed a non-managerial role at a start-up company (non-Fortune 500). The results show that we are 95% confident that a person with these characteristics will earn between \$72,752 and \$77,612, with a prediction interval ranging from \$18,994 to \$131,370.
+
+```{r}
+New <- data.frame(yearsofexperience = 0, yearsatcompany = 0, gender = "Male",
+                  Race2 = "Non-White", educ3 = "College or below",
+                  country = "Canada", title4 = "Non-Management",
+                  Fortune_500 = "No")
+predict(model, New, interval = "confidence", level = 0.95)
+predict(model, New, interval = "prediction", level = 0.95)
+```
+
+```{r}
+# Load necessary library
+library(ggplot2)
+
+# Generate new data for a range of `yearsofexperience`
+new_data <- data.frame(
+  yearsofexperience = seq(0, 20, by = 1),  # Example range of years
+  yearsatcompany = seq(0, 20, by = 1),
+  gender = "Male",
+  Race2 = "Non-White",
+  educ3 = "College or below",
+  country = "Canada",
+  title4 = "Non-Management",
+  Fortune_500 = "No"
+)
+
+# Get predictions with intervals
+predictions <- predict(model, new_data, interval = "prediction", level = 0.95)
+confidence <- predict(model, new_data, interval = "confidence", level = 0.95)
+
+# Combine predictions with new data
+results <- cbind(new_data, predictions, confidence = confidence[, c("lwr", "upr")])
+
+# Plot using ggplot2
+ggplot(results, aes(x = yearsofexperience, y = fit)) +
+  geom_line(color = "blue") +  # Predicted values
+  geom_ribbon(aes(ymin = lwr, ymax = upr), fill = "blue", alpha = 0.2) +  # Prediction interval
+  geom_ribbon(aes(ymin = confidence.lwr, ymax = confidence.upr), fill = "green", alpha = 0.2) +  # Confidence interval
+  labs(
+    title = "Prediction and Confidence Intervals",
+    x = "Years of Experience",
+    y = "Predicted Base Salary"
+  ) +
+  theme_minimal()
+```
+
+### Best Model
+
+In summary, we believe that the simpler model, which includes only the main effects term and all the predictors—such as years of experience, years at company, gender, race, country, education, Fortune 500 status, and title—provides a strong prediction of the base salary for a STEM employee residing in the US, UK, Canada, and India.
+
+\begin{align*}
+\text{BaseSalary} = & \, \beta_0 + \beta_1 \cdot \text{YearsOfExperience} + \beta_2 \cdot \text{YearsAtCompany} + \beta_3 \cdot \text{GenderFemale} \\
+& + \beta_4 \cdot \text{RaceWhite} + \beta_5 \cdot \text{EducMaster'sDegree} + \beta_6 \cdot \text{EducPhD} \\
+& + \beta_7 \cdot \text{CountryIndia} + \beta_8 \cdot \text{CountryUK} + \beta_9 \cdot \text{CountryUS} \\
+& + \beta_{10} \cdot \text{TitleManagement} + \beta_{11} \cdot \text{Fortune500Yes} + \epsilon
+\end{align*}
+
+### Limitations and Future Improvements
+
+Our model comes with several limitations and opportunities for improvement.
+
+-   **Other contributing factors unaccounted for:**
+
+    -   The current model excludes significant predictors of base salary, such as:
+
+        -   **Tech Stack:** Top-paying programming languages and frameworks
+
+        -   **Industry**: Sector-specific variations (e.g., FinTech, AI/ML)
+
+        -   **Company Profitability:** Impact of employer financial health
+
+        -   **Prestige of Previous Employers:** Influence of working for high-profile companies (e.g., FAANG)
+
+-   **Inestimable parameters:** Some parameter combinations cannot be estimated due to missing data or sparse representation, limiting the model's ability to generalize for these cases.
+
+-   **Insufficient data for certain countries:** The dataset is heavily skewed, with the US accounting for 90% of responses. This imbalance reduces the model's ability to accurately represent salary trends in less-represented countries like the UK, Canada, and India.
+
+-   **Income disparity and outliers:** Income disparity within the US is pronounced, with several extreme outliers significantly inflating salaries compared to other countries. This likely affects the model’s performance and skews predictions.
